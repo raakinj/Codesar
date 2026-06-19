@@ -6,12 +6,14 @@ class EmptyState extends StatelessWidget {
   final IconData icon;
   final String title;
   final String subtitle;
+  final Widget? action;
 
   const EmptyState({
     super.key,
     required this.icon,
     required this.title,
     required this.subtitle,
+    this.action,
   });
 
   @override
@@ -45,11 +47,12 @@ class EmptyState extends StatelessWidget {
             Text(
               subtitle,
               textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 13,
-                color: AppColors.textSecondary,
-              ),
+              style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
             ),
+            if (action != null) ...[
+              const SizedBox(height: AppSpacing.lg),
+              action!,
+            ],
           ],
         ),
       ),

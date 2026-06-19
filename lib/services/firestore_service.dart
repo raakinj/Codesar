@@ -13,6 +13,30 @@ class FirestoreService {
         );
   }
 
+  Future<DocumentSnapshot> getUserProfile(String uid) async {
+    return await _firestore.collection('users').doc(uid).get();
+  }
+
+  Future<bool> isSlugTaken(String slug, String currentUid) async {
+    final query = await _firestore
+        .collection('users')
+        .where('slug', isEqualTo: slug)
+        .limit(1)
+        .get();
+    if (query.docs.isEmpty) return false;
+    return query.docs.first.id != currentUid;
+  }
+
+  Future<Map<String, dynamic>?> getUserBySlug(String slug) async {
+    final query = await _firestore
+        .collection('users')
+        .where('slug', isEqualTo: slug)
+        .limit(1)
+        .get();
+    if (query.docs.isEmpty) return null;
+    return query.docs.first.data();
+  }
+
   Future<void> incrementProfileViews(String uid) async {
     await _firestore.collection('users').doc(uid).update({
       'profileViews': FieldValue.increment(1),
@@ -23,16 +47,6 @@ class FirestoreService {
     await _firestore.collection('users').doc(uid).update({
       'qrScans': FieldValue.increment(1),
     });
-  }
-
-  Future<void> incrementContactsSaved(String uid) async {
-    await _firestore.collection('users').doc(uid).update({
-      'contactsSaved': FieldValue.increment(1),
-    });
-  }
-
-  Future<DocumentSnapshot> getUserProfile(String uid) async {
-    return await _firestore.collection('users').doc(uid).get();
   }
 
   Future<bool> saveContact({
@@ -51,9 +65,7 @@ class FirestoreService {
     return _firestore.runTransaction<bool>((transaction) async {
       final existing = await transaction.get(contactRef);
 
-      if (existing.exists) {
-        return false;
-      }
+      if (existing.exists) return false;
 
       transaction.set(contactRef, contactData);
       transaction.update(profileRef, {
