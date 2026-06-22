@@ -13,52 +13,82 @@ class QrScannerScreen extends StatefulWidget {
 }
 
 class _QrScannerScreenState extends State<QrScannerScreen> {
-  final FirestoreService firestoreService = FirestoreService();
+  final FirestoreService _svc = FirestoreService();
   bool scanned = false;
 
-  Future<void> loadProfile(String uid) async {
-    try {
-      final doc = await firestoreService.getUserProfile(uid);
+  // Returns slug (from URL QR) or raw value (legacy uid QR)
+  // Never returns the full URL
+  String? _extractSlug(String raw) {
+    // Detect URL format
+    final uri = Uri.tryParse(raw);
+    if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
+      final segments = uri.pathSegments;
+      // Expected: /card/{slug}
+      if (segments.length >= 2 && segments[0] == 'card' && segments[1].isNotEmpty) {
+        return segments[1];
+      }
+      // Unrecognised URL — don't pass to Firestore
+      return null;
+    }
+    // Not a URL — treat as legacy uid
+    return raw;
+  }
 
-      if (!doc.exists) {
+  Future<void> _loadProfile(String raw) async {
+    try {
+      final slug = _extractSlug(raw);
+
+      if (slug == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('User not found'),
-            ),
+            const SnackBar(content: Text('Unrecognised QR code')),
           );
-
           setState(() => scanned = false);
         }
         return;
       }
 
-      await firestoreService.incrementQrScans(uid);
+      Map<String, dynamic>? userData;
+
+      // Determine lookup strategy
+      final uri = Uri.tryParse(raw);
+      final isUrl = uri != null && (uri.scheme == 'http' || uri.scheme == 'https');
+
+      if (isUrl) {
+        // Slug-based lookup
+        userData = await _svc.getUserBySlug(slug);
+      } else {
+        // Legacy uid-based lookup
+        final doc = await _svc.getUserProfile(slug);
+        if (doc.exists) {
+          userData = doc.data() as Map<String, dynamic>?;
+        }
+      }
+
+      if (userData == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('User not found')),
+          );
+          setState(() => scanned = false);
+        }
+        return;
+      }
+
+      final uid = userData['uid'] as String?;
+      if (uid != null && uid.isNotEmpty) {
+        await _svc.incrementQrScans(uid);
+      }
 
       if (!mounted) return;
 
-      final userData = doc.data() as Map<String, dynamic>;
-
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(
-          builder: (_) => ViewCardScreen(
-            userData: userData,
-          ),
-        ),
+        MaterialPageRoute(builder: (_) => ViewCardScreen(userData: userData!)),
       );
     } catch (e) {
-      debugPrint('QR Scanner Error: $e');
-
-      if (mounted) {
-        setState(() => scanned = false);
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: $e'),
-          ),
-        );
-      }
+      debugPrint('QR load error: $e');
+      if (mounted) setState(() => scanned = false);
     }
   }
 
@@ -77,16 +107,10 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
           MobileScanner(
             onDetect: (capture) {
               if (scanned) return;
-
-              final barcode = capture.barcodes.first;
-              final uid = barcode.rawValue;
-
-              if (uid == null || uid.isEmpty) {
-                return;
-              }
-
+              final raw = capture.barcodes.first.rawValue;
+              if (raw == null || raw.isEmpty) return;
               setState(() => scanned = true);
-              loadProfile(uid);
+              _loadProfile(raw);
             },
           ),
           Center(
@@ -94,13 +118,8 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
               width: 240,
               height: 240,
               decoration: BoxDecoration(
-                border: Border.all(
-                  color: Colors.white,
-                  width: 3,
-                ),
-                borderRadius: BorderRadius.circular(
-                  AppRadius.lg,
-                ),
+                border: Border.all(color: Colors.white, width: 3),
+                borderRadius: BorderRadius.circular(AppRadius.lg),
               ),
             ),
           ),
@@ -112,7 +131,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
               'Align the QR code within the frame',
               textAlign: TextAlign.center,
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.9),
+                color: Colors.white.withOpacity(0.9),
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
               ),

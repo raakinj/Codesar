@@ -1,8 +1,11 @@
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../services/firestore_service.dart';
 import '../theme/app_theme.dart';
+import '../utils/vcf_downloader.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/premium_business_card.dart';
 
@@ -16,30 +19,27 @@ class PublicCardScreen extends StatefulWidget {
 }
 
 class _PublicCardScreenState extends State<PublicCardScreen> {
-  final FirestoreService firestoreService = FirestoreService();
+  final FirestoreService _svc = FirestoreService();
 
   Map<String, dynamic>? userData;
   bool isLoading = true;
   bool viewRecorded = false;
-  bool isSaving = false;
+  bool isDownloading = false;
 
   @override
   void initState() {
     super.initState();
-    loadCard();
+    _loadCard();
   }
 
-  Future<void> loadCard() async {
+  Future<void> _loadCard() async {
     try {
-      final data = await firestoreService.getUserBySlug(widget.slug);
+      final data = await _svc.getUserBySlug(widget.slug);
       setState(() {
         userData = data;
         isLoading = false;
       });
-
-      if (data != null) {
-        _recordView(data['uid'] as String?);
-      }
+      if (data != null) _recordView(data['uid'] as String?);
     } catch (e) {
       debugPrint('Public card load error: $e');
       setState(() => isLoading = false);
@@ -50,55 +50,94 @@ class _PublicCardScreenState extends State<PublicCardScreen> {
     if (viewRecorded || uid == null) return;
     viewRecorded = true;
     try {
-      await firestoreService.incrementProfileViews(uid);
+      await _svc.incrementProfileViews(uid);
     } catch (_) {}
   }
 
-  Future<void> saveContact() async {
-    if (isSaving) return;
+  String _buildVcf() {
+    final d = userData ?? {};
+    final lines = <String>[
+      'BEGIN:VCARD',
+      'VERSION:3.0',
+      'FN:${d['name'] ?? ''}',
+      'ORG:${d['company'] ?? ''}',
+      'TITLE:${d['designation'] ?? ''}',
+    ];
+    final phone = (d['phone'] as String? ?? '').trim();
+    if (phone.isNotEmpty) lines.add('TEL;TYPE=CELL:$phone');
+    final email = (d['email'] as String? ?? '').trim();
+    if (email.isNotEmpty) lines.add('EMAIL:$email');
+    final website = (d['website'] as String? ?? '').trim();
+    if (website.isNotEmpty) lines.add('URL:$website');
+    final linkedin = (d['linkedin'] as String? ?? '').trim();
+    if (linkedin.isNotEmpty) lines.add('X-SOCIALPROFILE;TYPE=linkedin:$linkedin');
+    final bio = (d['bio'] as String? ?? '').trim();
+    if (bio.isNotEmpty) lines.add('NOTE:$bio');
+    lines.add('END:VCARD');
+    return lines.join('\r\n');
+  }
 
-    final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Sign in to save contacts')),
-      );
-      return;
-    }
-
-    final contactUid = userData?['uid'] as String?;
-    if (contactUid == null) return;
-
-    if (contactUid == currentUser.uid) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("You can't save your own card")),
-      );
-      return;
-    }
-
-    setState(() => isSaving = true);
-
+  Future<void> _downloadContact() async {
+    if (userData == null) return;
+    setState(() => isDownloading = true);
     try {
-      final isNew = await firestoreService.saveContact(
-        ownerUid: currentUser.uid,
-        contactUid: contactUid,
-        contactData: userData!,
+      final content = _buildVcf();
+      final rawName = (userData!['name'] as String? ?? 'contact')
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^a-z0-9]'), '-');
+      await downloadVcf(
+        content: content,
+        filename: '$rawName.vcf',
+        contactName: userData!['name'] as String? ?? '',
       );
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(isNew ? 'Contact saved' : 'Contact already saved')),
-        );
-      }
     } catch (e) {
-      debugPrint('Save Contact Error: $e');
+      debugPrint('VCF error: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to save contact')),
+          const SnackBar(content: Text('Could not download contact')),
         );
       }
     }
+    if (mounted) setState(() => isDownloading = false);
+  }
 
-    if (mounted) setState(() => isSaving = false);
+  Future<void> _shareProfile() async {
+    final url =
+        'https://digital-business-card-ea8cf.web.app/card/${widget.slug}';
+    final name = (userData?['name'] as String? ?? '').trim();
+    final shareText =
+        name.isNotEmpty ? 'Check out $name\'s digital card: $url' : url;
+
+    if (kIsWeb) {
+      // On web: Share.share() silently does nothing when Web Share API
+      // is unavailable (Chrome Desktop, Edge Desktop, Firefox).
+      // Copy to clipboard — works reliably on all browsers with a user gesture.
+      try {
+        await Clipboard.setData(ClipboardData(text: url));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Link copied to clipboard')),
+          );
+        }
+      } catch (e) {
+        debugPrint('Clipboard error: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: SelectableText(url)),
+          );
+        }
+      }
+    } else {
+      // On mobile app: use native share sheet
+      try {
+        await Share.share(
+          shareText,
+          subject: name.isNotEmpty ? '$name - Digital Business Card' : 'Digital Business Card',
+        );
+      } catch (e) {
+        debugPrint('Share error: $e');
+      }
+    }
   }
 
   @override
@@ -117,17 +156,34 @@ class _PublicCardScreenState extends State<PublicCardScreen> {
         body: const EmptyState(
           icon: Icons.person_search,
           title: 'Card not found',
-          subtitle: 'This business card link is invalid or has been removed.',
+          subtitle: 'This link is invalid or has been removed.',
         ),
       );
     }
 
+    final theme = cardThemeFromKey(userData!['cardTheme'] as String?);
+
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: AppBar(title: const Text('Business Card')),
+      appBar: AppBar(
+        title: const Text('Business Card'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.share_outlined),
+            tooltip: 'Share',
+            onPressed: _shareProfile,
+          ),
+        ],
+      ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(AppSpacing.lg),
+        padding: const EdgeInsets.fromLTRB(
+          AppSpacing.lg,
+          AppSpacing.lg,
+          AppSpacing.lg,
+          AppSpacing.xl,
+        ),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             PremiumBusinessCard(
               name: userData!['name'] ?? '',
@@ -138,21 +194,73 @@ class _PublicCardScreenState extends State<PublicCardScreen> {
               linkedin: userData!['linkedin'] ?? '',
               website: userData!['website'] ?? '',
               bio: userData!['bio'] ?? '',
+              theme: theme,
             ),
+
             const SizedBox(height: AppSpacing.xl),
+
             SizedBox(
-              width: double.infinity,
-              height: 52,
+              height: 54,
               child: ElevatedButton.icon(
-                onPressed: isSaving ? null : saveContact,
-                icon: isSaving
+                onPressed: isDownloading ? null : _downloadContact,
+                icon: isDownloading
                     ? const SizedBox(
                         width: 18,
                         height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
                       )
-                    : const Icon(Icons.person_add_outlined),
-                label: Text(isSaving ? 'Saving...' : 'Save Contact'),
+                    : const Icon(Icons.download_rounded, size: 22),
+                label: Text(
+                  isDownloading ? 'Downloading...' : 'Download Contact',
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primaryBlue,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                  ),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: AppSpacing.sm),
+
+            SizedBox(
+              height: 54,
+              child: OutlinedButton.icon(
+                onPressed: _shareProfile,
+                icon: const Icon(Icons.share_outlined, size: 20),
+                label: const Text(
+                  'Share Profile',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.primaryBlue,
+                  side: const BorderSide(
+                      color: AppColors.primaryBlue, width: 1.5),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                  ),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: AppSpacing.xl),
+
+            Center(
+              child: Text(
+                'Digital Business Card',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppColors.textSecondary.withOpacity(0.5),
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
           ],
